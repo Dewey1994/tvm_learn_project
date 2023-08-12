@@ -46,8 +46,10 @@ np_running_time = timeit.timeit(
 print("Numpy running time: %f" % (np_running_time / np_repeat))
 
 answer = numpy.dot(a.numpy(), b.numpy())
+# ----- numpy end -----
 
 
+# ----- naive begin -----
 # TVM Matrix Multiplication using TE
 k = te.reduce_axis((0, K), "k")
 A = te.placeholder((M, K), name="A")
@@ -79,6 +81,140 @@ def evaluate_operation(s, vars, target, name, optimization, log):
 
 log = []
 
-evaluate_operation(s, [A, B, C], target=target, name="mmult", optimization="none", log=log)
+# evaluate_operation(s, [A, B, C], target=target, name="mmult", optimization="none", log=log)
 
-print(tvm.lower(s, [A, B, C], simple_mode=True))
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+
+# ----- naive end -----
+
+# ----- tile begin -----
+
+bn = 32
+
+# Blocking by loop tiling
+xo, yo, xi, yi = s[C].tile(C.op.axis[0], C.op.axis[1], bn, bn)
+(k,) = s[C].op.reduce_axis
+ko, ki = s[C].split(k, factor=4)
+
+# Hoist reduction domain outside the blocking loop
+s[C].reorder(xo, yo, ko, ki, xi, yi)
+
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+evaluate_operation(s, [A, B, C], target=target, name="mmult", optimization="blocking", log=log)
+
+# ----- tile end -----
+
+# ----- vectorization begin -----
+
+# Apply the vectorization optimization
+s[C].vectorize(yi)
+
+evaluate_operation(s, [A, B, C], target=target, name="mmult", optimization="vectorization", log=log)
+
+# The generalized IR after vectorization
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+
+# ----- vectorization end -----
+
+
+# -----loop permutation begin -----
+s = te.create_schedule(C.op)
+xo, yo, xi, yi = s[C].tile(C.op.axis[0], C.op.axis[1], bn, bn)
+(k,) = s[C].op.reduce_axis
+ko, ki = s[C].split(k, factor=4)
+
+# re-ordering
+s[C].reorder(xo, yo, ko, xi, ki, yi)
+s[C].vectorize(yi)
+
+evaluate_operation(
+    s, [A, B, C], target=target, name="mmult", optimization="loop permutation", log=log
+)
+
+# Again, print the new generalized IR
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+# -----loop permutation end -----
+
+# -----array packing begin -----
+# We have to re-write the algorithm slightly.
+# N=K=M=16,bn=4，(4,16,4)  y[0,15] x,z[0,3]
+packedB = te.compute((N / bn, K, bn), lambda x, y, z: B[y, x * bn + z], name="packedB")
+C = te.compute(
+    (M, N),
+    lambda x, y: te.sum(A[x, k] * packedB[y // bn, k, tvm.tir.indexmod(y, bn)], axis=k),
+    name="C",
+)
+
+s = te.create_schedule(C.op)
+
+xo, yo, xi, yi = s[C].tile(C.op.axis[0], C.op.axis[1], bn, bn)
+(k,) = s[C].op.reduce_axis
+ko, ki = s[C].split(k, factor=4)
+
+s[C].reorder(xo, yo, ko, xi, ki, yi)
+s[C].vectorize(yi)
+
+x, y, z = s[packedB].op.axis
+s[packedB].vectorize(z)
+s[packedB].parallel(x)
+
+evaluate_operation(s, [A, B, C], target=target, name="mmult", optimization="array packing", log=log)
+
+# Here is the generated IR after array packing.
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+# -----array packing end -----
+
+# -----write cache begin ------
+s = te.create_schedule(C.op)
+
+# Allocate write cache
+CC = s.cache_write(C, "global")
+
+xo, yo, xi, yi = s[C].tile(C.op.axis[0], C.op.axis[1], bn, bn)
+
+# Write cache is computed at yo
+s[CC].compute_at(s[C], yo)
+
+# New inner axes
+xc, yc = s[CC].op.axis
+
+(k,) = s[CC].op.reduce_axis
+ko, ki = s[CC].split(k, factor=4)
+s[CC].reorder(ko, xc, ki, yc)
+s[CC].unroll(ki)
+s[CC].vectorize(yc)
+
+x, y, z = s[packedB].op.axis
+s[packedB].vectorize(z)
+s[packedB].parallel(x)
+
+evaluate_operation(s, [A, B, C], target=target, name="mmult", optimization="block caching", log=log)
+
+# Here is the generated IR after write cache blocking.
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+# -----write cache end ------
+
+# -----parallel begin -----
+# parallel
+s[C].parallel(xo)
+
+x, y, z = s[packedB].op.axis
+s[packedB].vectorize(z)
+s[packedB].parallel(x)
+
+evaluate_operation(
+    s, [A, B, C], target=target, name="mmult", optimization="parallelization", log=log
+)
+
+# Here is the generated IR after parallelization.
+# print(tvm.lower(s, [A, B, C], simple_mode=True))
+# -----parallel end -----
+
+
+baseline = log[0][1]
+print("%s\t%s\t%s" % ("Operator".rjust(20), "Timing".rjust(20), "Performance".rjust(20)))
+for result in log:
+    print(
+        "%s\t%s\t%s"
+        % (result[0].rjust(20), str(result[1]).rjust(20), str(result[1] / baseline).rjust(20))
+    )

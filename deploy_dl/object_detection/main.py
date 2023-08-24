@@ -1,3 +1,4 @@
+import copy
 import random
 import time
 
@@ -109,8 +110,6 @@ vm.set_input("main", **{input_name: img})
 tvm_res = vm.run()
 
 
-import timeit
-
 timing_number = 10
 timing_repeat = 10
 unoptimized = (
@@ -205,9 +204,14 @@ def postprocess(img,boxes,labels):
         img = draw_label_type(img,boxes[i],labels[i],different_labels[labels[i]])
         img = cv2.rectangle(img, (boxes[i][0], boxes[i][1]), (boxes[i][2], boxes[i][3]), color=different_labels[labels[i]], thickness=2)
     return img
-
+img2 = copy.deepcopy(img1)
 img_res = postprocess(img1,valid_boxes,valid_labels)
+plt.figure()
+plt.subplot(1,2,1)
+plt.imshow(img2)
+plt.subplot(1,2,2)
 plt.imshow(img_res)
+plt.savefig('output.png', dpi=500)
 plt.show()
 
 

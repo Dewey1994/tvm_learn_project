@@ -3,7 +3,6 @@ import time
 
 import tvm
 from tvm import relay
-from tvm import relay
 from tvm.runtime.vm import VirtualMachine
 from tvm.contrib.download import download_testdata
 
@@ -44,7 +43,6 @@ class TraceWrapper(torch.nn.Module):
 
 model_func = torchvision.models.detection.maskrcnn_resnet50_fpn
 # model_func = torch.hub.load('zhiqwang/yolov5-rt-stack', 'yolov5s',pretrained=True)
-model = TraceWrapper(model_func)
 model = TraceWrapper(model_func(pretrained=True))
 
 model.eval()
@@ -54,16 +52,25 @@ with torch.no_grad():
     out = model(inp)
     script_module = do_trace(model, inp)
 
-start = time.time()
-repeats = 50
-for i in range(repeats):
-    np_out = model(inp)
-end = time.time()
-print("torch Runtime: %f ms." % (1000 * ((end - start) / repeats)))
+import timeit
+
+timing_number = 10
+timing_repeat = 10
+unoptimized = (
+    np.array(timeit.Timer(lambda: model(inp)).repeat(repeat=timing_repeat, number=timing_number))
+    * 1000
+    / timing_number
+)
+unoptimized = {
+    "mean": np.mean(unoptimized),
+    "median": np.median(unoptimized),
+    "std": np.std(unoptimized),
+}
+
+print(f'torch time {unoptimized}')
 
 img_url = (
     "https://raw.githubusercontent.com/dmlc/web-data/master/gluoncv/detection/street_small.jpg"
-# "https://s3.amazonaws.com/model-server/inputs/kitten.jpg"
 )
 img_path = download_testdata(img_url, "street_small.jpg", module="data")
 
@@ -85,7 +92,7 @@ img = np.expand_dims(img, axis=0)
 input_name = "input0"
 shape_list = [(input_name, input_shape)]
 mod, params = relay.frontend.from_pytorch(script_module, shape_list)
-
+print(mod.astext(show_meta_data=False))
 
 # Add "-libs=mkl" to get best performance on x86 target.
 # For x86 machine supports AVX512, the complete target is
@@ -102,12 +109,22 @@ vm.set_input("main", **{input_name: img})
 tvm_res = vm.run()
 
 
-start = time.time()
-repeats = 50
-for i in range(repeats):
-    tvm_res = vm.run()
-end = time.time()
-print("tvm Runtime: %f ms." % (1000 * ((end - start) / repeats)))
+import timeit
+
+timing_number = 10
+timing_repeat = 10
+unoptimized = (
+    np.array(timeit.Timer(lambda: model(inp)).repeat(repeat=timing_repeat, number=timing_number))
+    * 1000
+    / timing_number
+)
+unoptimized = {
+    "mean": np.mean(unoptimized),
+    "median": np.median(unoptimized),
+    "std": np.std(unoptimized),
+}
+
+print(f'tvm deploy time {unoptimized}')
 
 label_dict={1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane', 6: 'bus', 7: 'train', 8: 'truck',
            9: 'boat', 10: 'traffic light', 11: 'fire hydrant', 13: 'stop sign', 14: 'parking meter', 15: 'bench',
@@ -192,6 +209,7 @@ def postprocess(img,boxes,labels):
 img_res = postprocess(img1,valid_boxes,valid_labels)
 plt.imshow(img_res)
 plt.show()
-print("Get {} valid boxes".format(len(valid_boxes)))
 
+
+print("Get {} valid boxes".format(len(valid_boxes)))
 

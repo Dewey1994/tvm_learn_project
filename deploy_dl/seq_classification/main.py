@@ -1,4 +1,5 @@
 import random
+import time
 
 import tvm
 from tvm import relay
@@ -9,8 +10,8 @@ from tvm.contrib.download import download_testdata
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
-from transformers import AutoModel, AutoTokenizer
-
+from transformers import AutoModel, AutoTokenizer, BertForMaskedLM
+import onnx
 # PyTorch imports
 import torch
 
@@ -50,24 +51,48 @@ input_ids_tensor = torch.tensor([input_ids])
 atten_mask_tensors = torch.tensor([atten_mask])
 token_type_ids_tensors = torch.tensor([token_type_ids])
 
+model = BertForMaskedLM.from_pretrained("/Users/dewey/bert-base-uncased")
+res = model(input_ids=input_ids_tensor,attention_mask=atten_mask_tensors,token_type_ids=token_type_ids_tensors)
+
+
+
+import timeit
+
+timing_number = 10
+timing_repeat = 10
+unoptimized = (
+    np.array(timeit.Timer(lambda: model(input_ids=input_ids_tensor,attention_mask=atten_mask_tensors,token_type_ids=token_type_ids_tensors)).repeat(repeat=timing_repeat, number=timing_number))
+    * 1000
+    / timing_number
+)
+unoptimized = {
+    "mean": np.mean(unoptimized),
+    "median": np.median(unoptimized),
+    "std": np.std(unoptimized),
+}
+
+print(unoptimized)
+
+
 dummy_input = [input_ids_tensor, atten_mask_tensors, token_type_ids_tensors]
 
 
 # If you are instantiating the model with `from_pretrained` you can also easily set the TorchScript flag
-model = AutoModel.from_pretrained("/Users/dewey/bert-base-uncased", torchscript=True)
-
+# model = AutoModel.from_pretrained("/Users/dewey/bert-base-uncased", onnx=True)
+onnx_model = onnx.load('/Users/dewey/bert-base-uncased/model.onnx')
 # The model needs to be in evaluation mode
-model.eval()
-
-# Creating the trace
-traced_model = torch.jit.trace(model, dummy_input)
-# traced_model = torch.jit.script(model, dummy_input)
-traced_model.eval()
-script_module = traced_model
-
+# model.eval()
+#
+# # Creating the trace
+# traced_model = torch.jit.trace(model, dummy_input)
+# # traced_model = torch.jit.script(model, dummy_input)
+# traced_model.eval()
+# script_module = traced_model
+#
 input_infos = [("input_ids", input_ids_tensor.shape), ("attention_mask", atten_mask_tensors.shape),
                ("token_type_ids", token_type_ids_tensors.shape)]
-mod, params = relay.frontend.from_pytorch(script_module, input_infos)
+input_dict = {"input_ids":input_ids_tensor.shape,"attention_mask":atten_mask_tensors.shape,"token_type_ids":token_type_ids_tensors.shape}
+mod, params = relay.frontend.from_onnx(onnx_model, input_dict)
 
 
 # Add "-libs=mkl" to get best performance on x86 target.
@@ -78,5 +103,27 @@ target = "llvm"
 with tvm.transform.PassContext(opt_level=3):
     vm_exec = relay.vm.compile(mod, target=target, params=params)
 
+
+dev = tvm.cpu()
+vm = VirtualMachine(vm_exec, dev)
+vm.set_input("main", **{'input_ids': input_ids_tensor.numpy(),'attention_mask':atten_mask_tensors.numpy(),
+                        'token_type_ids':token_type_ids_tensors.numpy()})
+
+import timeit
+
+timing_number = 10
+timing_repeat = 10
+unoptimized = (
+    np.array(timeit.Timer(lambda: vm.run()).repeat(repeat=timing_repeat, number=timing_number))
+    * 1000
+    / timing_number
+)
+unoptimized = {
+    "mean": np.mean(unoptimized),
+    "median": np.median(unoptimized),
+    "std": np.std(unoptimized),
+}
+
+print(unoptimized)
 
 
